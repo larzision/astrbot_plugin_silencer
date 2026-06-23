@@ -1,0 +1,6 @@
+name: astrbot_plugin_silencer
+description: 消音器 - 拉黑拦截+睡眠模式管理
+author: miko
+version: 1.7.0
+display_name: 消音器
+repo: https://github.com/larzision

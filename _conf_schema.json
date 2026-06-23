@@ -1,0 +1,142 @@
+{
+  "_blacklist_section": {
+    "description": "════ 🚫 黑名单配置 ════",
+    "type": "string",
+    "hint": "黑名单相关功能配置",
+    "default": "--- 黑名单区 ---"
+  },
+  "blacklist": {
+    "description": "黑名单用户ID列表",
+    "type": "list",
+    "hint": "输入需要拉黑的用户ID，多个用逗号分隔",
+    "default": []
+  },
+  "blacklist_enabled": {
+    "description": "启用黑名单功能",
+    "type": "bool",
+    "hint": "关闭后所有消息正常回复",
+    "default": true
+  },
+  "admin_only": {
+    "description": "拉黑工具限管理员",
+    "type": "bool",
+    "hint": "开启后只有管理员才能拉黑",
+    "default": true
+  },
+  "immune_list": {
+    "description": "免疫名单(免黑名单)",
+    "type": "list",
+    "hint": "这些用户即使被拉黑也不会被拦截",
+    "default": []
+  },
+  "min_block_minutes": {
+    "description": "最短拉黑时长",
+    "type": "float",
+    "hint": "单位:分钟。0不限制",
+    "default": 5
+  },
+  "max_block_minutes": {
+    "description": "最长拉黑时长",
+    "type": "float",
+    "hint": "单位:分钟。0不限制",
+    "default": 120
+  },
+  "_sleep_section": {
+    "description": "════ 🌙 睡眠模式配置 ════",
+    "type": "string",
+    "hint": "睡眠模式相关功能配置",
+    "default": "--- 睡眠模式区 ---"
+  },
+  "sleep_mode_enabled": {
+    "description": "启用睡眠模式",
+    "type": "bool",
+    "hint": "关闭后睡眠不拦截消息",
+    "default": true
+  },
+  "sleep_scope": {
+    "description": "睡眠作用范围",
+    "type": "string",
+    "options": ["全局", "仅触发的对话"],
+    "hint": "全局=所有对话，仅触发的对话=只在当前对话",
+    "default": "全局"
+  },
+  "sleep_mode": {
+    "description": "全局睡眠状态",
+    "type": "bool",
+    "hint": "工具控制，全局模式时有效",
+    "default": false
+  },
+  "sleep_mode_sessions": {
+    "description": "会话级睡眠状态",
+    "type": "list",
+    "hint": "工具控制，修改则开始处理对应对话。session模式时有效",
+    "default": []
+  },
+  "sleep_until": {
+    "description": "自动唤醒队列",
+    "type": "list",
+    "hint": "工具控制，仅供查看禁止修改。每条格式 会话ID:时间戳",
+    "default": []
+  },
+  "sleep_whitelist": {
+    "description": "睡眠白名单",
+    "type": "list",
+    "hint": "睡觉期间也能打扰的人",
+    "default": []
+  },
+  "sleep_disabled_sessions": {
+    "description": "关闭睡眠的对话",
+    "type": "list",
+    "hint": "填对话ID，这些对话睡眠不生效",
+    "default": []
+  },
+  "sleep_max_cache": {
+    "description": "每会话缓存上限",
+    "type": "int",
+    "hint": "每个对话缓存几条消息，推荐1~5",
+    "default": 3
+  },
+  "sleep_max_total": {
+    "description": "总会话缓存上限",
+    "type": "int",
+    "hint": "最多缓存几个对话，0不限制",
+    "default": 5
+  },
+  "sleep_start_time": {
+    "description": "可睡眠时段-开始",
+    "type": "string",
+    "hint": "格式 HH:MM，与结束时间形成区间",
+    "default": ""
+  },
+  "sleep_end_time": {
+    "description": "可睡眠时段-结束",
+    "type": "string",
+    "hint": "格式 HH:MM，与开始时间形成区间",
+    "default": ""
+  },
+  "sleep_duration_min": {
+    "description": "最短睡眠时长",
+    "type": "float",
+    "hint": "单位:小时。实际在此区间随机",
+    "default": 2
+  },
+  "sleep_duration_max": {
+    "description": "最长睡眠时长",
+    "type": "float",
+    "hint": "单位:小时。实际在此区间随机",
+    "default": 3
+  },
+  "sleep_custom_users": {
+    "description": "可指定睡眠时长用户",
+    "type": "list",
+    "hint": "这些用户可传参覆盖时长",
+    "default": []
+  },
+  "wake_inject_pos": {
+    "description": "刚睡醒注入位置",
+    "type": "string",
+    "hint": "注入到对话开头还是系统提示末尾",
+    "options": ["prompt", "system"],
+    "default": "prompt"
+  }
+}

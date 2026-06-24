@@ -400,6 +400,13 @@ class SilencerPlugin(star.Star):
 
     @filter.llm_tool(name="block_user")
     async def block_user(self, event: AstrMessageEvent, user_id: str, duration_minutes: float = 0):
+        '''
+        拉黑指定用户，阻止其消息被回复。当用户违规或你不想理他时，主动拉黑。
+        
+        Args:
+            user_id(string): 需要拉黑的用户ID
+            duration_minutes(number): 拉黑时长(分钟)，0表示永久拉黑。可选参数，默认0
+        '''
         role = getattr(event, 'role', None)
         if self.admin_only and role is not None and role != "admin":
             return "权限不足，只有管理员才能拉黑用户"
@@ -533,17 +540,32 @@ class SilencerPlugin(star.Star):
 
     @filter.command("拉黑")
     async def add_blacklist(self, event: AstrMessageEvent):
-        args = event.get_args()
-        if not args:
+        sid = event.get_sender_id()
+        role = getattr(event, 'role', None)
+        wl = self.config.get("cmd_whitelist", [])
+        if self.admin_only and role != "admin" and sid not in wl:
+            yield event.plain_result("权限不足")
+            return
+            return
+        # 尝试从消息链提取at
+        target = ""
+        for comp in event.get_messages():
+            if hasattr(comp, 'qq') and str(comp.qq).isdigit():
+                target = str(comp.qq)
+                break
+        if not target:
+            parts = event.message_str.strip().split()
+            if len(parts) >= 2:
+                target = parts[1]
+        if not target:
             yield event.plain_result("用法: 拉黑 <用户ID> [分钟数]")
             return
-        target = args[0].strip()
         minutes = 0
-        if len(args) > 1:
+        for part in event.message_str.strip().split():
             try:
-                minutes = float(args[1])
-            except ValueError:
-                pass
+                minutes = float(part)
+            except:
+                continue
         blacklist = self._get_list()
         if target in blacklist:
             yield event.plain_result(f"{target} 已经在黑名单里了")
@@ -567,11 +589,24 @@ class SilencerPlugin(star.Star):
 
     @filter.command("取消拉黑")
     async def remove_blacklist(self, event: AstrMessageEvent):
-        args = event.get_args()
-        if not args:
+        sid = event.get_sender_id()
+        role = getattr(event, 'role', None)
+        wl = self.config.get("cmd_whitelist", [])
+        if self.admin_only and role != "admin" and sid not in wl:
+            yield event.plain_result("权限不足")
+            return
+        target = ""
+        for comp in event.get_messages():
+            if hasattr(comp, 'qq') and str(comp.qq).isdigit():
+                target = str(comp.qq)
+                break
+        if not target:
+            parts = event.message_str.strip().split()
+            if len(parts) >= 2:
+                target = parts[1]
+        if not target:
             yield event.plain_result("用法: 取消拉黑 <用户ID>")
             return
-        target = args[0].strip()
         blacklist = self._get_list()
         if target not in blacklist:
             yield event.plain_result(f"{target} 不在黑名单里")

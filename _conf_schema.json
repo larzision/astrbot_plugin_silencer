@@ -20,8 +20,14 @@
   "admin_only": {
     "description": "拉黑工具限管理员",
     "type": "bool",
-    "hint": "开启后只有管理员才能拉黑",
+    "hint": "可手动修改。开启后只有管理员才能拉黑",
     "default": true
+  },
+  "cmd_whitelist": {
+    "description": "命令白名单",
+    "type": "list",
+    "hint": "可手动修改。这些用户可用拉黑/取消拉黑命令",
+    "default": []
   },
   "immune_list": {
     "description": "免疫名单(免黑名单)",
@@ -81,7 +87,7 @@
   "sleep_whitelist": {
     "description": "睡眠白名单",
     "type": "list",
-    "hint": "睡觉期间也能打扰的人",
+    "hint": "全局模式睡觉期间也能打扰的人",
     "default": []
   },
   "sleep_disabled_sessions": {

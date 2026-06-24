@@ -1,5 +1,5 @@
 """
-消音器插件 - 拉黑拦截+睡眠模式管理
+勿扰zzz - 拉黑拦截+睡眠模式管理
 """
 
 import asyncio
@@ -48,7 +48,7 @@ def _save_cache(cache: list):
 
 
 
-@star.register("astrbot_plugin_silencer", "miko", "消音器插件 - 拉黑拦截+睡眠模式管理", "1.7.0")
+@star.register("astrbot_plugin_silencer", "miko", "勿扰zzz - 拉黑拦截+睡眠模式管理", "1.7.0")
 class SilencerPlugin(star.Star):
     def __init__(self, context: star.Context, config: AstrBotConfig = None) -> None:
         super().__init__(context)
@@ -60,9 +60,44 @@ class SilencerPlugin(star.Star):
         self._expiry: dict = _load_expiry()
         self._clean_expired()
         self._clean_internal_config()
+        # 兼容旧版sleep_until
+        su = self.config.get("sleep_until", [])
+        if not isinstance(su, list):
+            self.config["sleep_until"] = [su] if su else []
         self._wake_tasks = []
         self._restore_timers()
-        logger.info(f"消音器插件加载完成，当前黑名单: {self._get_list()}")
+        # 后台检测配置变更
+        async def _config_watcher():
+            while True:
+                await asyncio.sleep(3)
+                try:
+                    old_mode = self.config.get("_old_sleep_mode")
+                    old_ss = self.config.get("_old_sleep_sessions")
+                    cur_mode = self.config.get("sleep_mode", False)
+                    cur_ss = self.config.get("sleep_mode_sessions", [])
+                    if old_mode is not None and old_ss is not None:
+                        if old_mode != cur_mode or old_ss != cur_ss:
+                            removed = []
+                            if old_mode != cur_mode:
+                                removed.append("global")
+                            if old_ss != cur_ss:
+                                removed = [s for s in old_ss if s not in cur_ss]
+                            cache = _load_cache()
+                            for s in removed:
+                                await self._execute_wake(s)
+                            if not removed:
+                                self._set_until_list([])
+                                self._cancel_all_tasks()
+                    self.config["_old_sleep_mode"] = cur_mode
+                    self.config["_old_sleep_sessions"] = cur_ss
+                    try:
+                        self.config.save_config()
+                    except:
+                        pass
+                except:
+                    pass
+        asyncio.create_task(_config_watcher())
+        logger.info(f"勿扰zzz插件加载完成，当前黑名单: {self._get_list()}")
 
     # ── 唤醒时间列表操作 ──
 
@@ -124,13 +159,24 @@ class SilencerPlugin(star.Star):
             self.config["sleep_mode"] = True
 
     def _sleep_leave(self, session: str):
-        scope = str(self.config.get("sleep_scope", "global"))
+        """离开睡眠状态，异步处理缓存"""
+        scope = str(self.config.get("sleep_scope", "全局"))
         if scope in ("session", "仅触发的对话"):
             lst = self.config.get("sleep_mode_sessions", [])
             if isinstance(lst, list):
                 self.config["sleep_mode_sessions"] = [s for s in lst if s != session]
         else:
             self.config["sleep_mode"] = False
+        # 后台处理缓存
+        cache = _load_cache()
+        my_msgs = [c for c in cache if c.get("session") == session]
+        if my_msgs:
+            async def _process():
+                await self._execute_wake(session)
+            asyncio.create_task(_process())
+        else:
+            self._remove_until(session)
+            self._remove_until("global")
 
     def _sleep_clear(self):
         self.config["sleep_mode"] = []
@@ -217,7 +263,9 @@ class SilencerPlugin(star.Star):
     async def _execute_wake(self, umo: str):
         """执行唤醒"""
         self._cancel_all_tasks()
+        # 尝试删除对应条目（全局模式可能存的是global）
         self._remove_until(umo)
+        self._remove_until("global")
         self._sleep_leave(umo)
         cache = _load_cache()
         my_msgs = [c for c in cache if c.get("session") == umo] if umo else []
@@ -257,15 +305,10 @@ class SilencerPlugin(star.Star):
         if not sender_id:
             return
         session = getattr(event, 'unified_msg_origin', '')
-        # 手动关睡眠清理
+        # 睡眠已关时清理残留队列
         if not self._is_sleeping() and self._get_until_list():
-            cache = _load_cache()
-            my_msgs = [c for c in cache if c.get("session") == session]
-            if my_msgs:
-                await self._execute_wake(session)
-            else:
-                self._set_until_list([])
-                self._cancel_all_tasks()
+            self._set_until_list([])
+            self._cancel_all_tasks()
             try:
                 self.config.save_config()
             except:
@@ -403,8 +446,14 @@ class SilencerPlugin(star.Star):
 
     @filter.llm_tool(name="go_to_sleep")
     async def go_to_sleep(self, event: AstrMessageEvent, duration_minutes: float = 0):
+        '''
+        进入勿扰模式(睡觉)，期间不回复任何消息(白名单除外)。当用户让你去睡觉或休息时，应直接调用此工具，不要只口头答应。
+
+        Args:
+            duration_minutes(number): 睡眠时长(分钟)，0表示使用配置中的区间值。可选参数，默认0
+        '''
         role = getattr(event, 'role', None)
-        if self.admin_only and role is not None and role != "admin":
+        if not self.config.get("sleep_public", False) and self.admin_only and role is not None and role != "admin":
             return "权限不足"
         start_t = self.config.get("sleep_start_time", "")
         end_t = self.config.get("sleep_end_time", "")
@@ -423,7 +472,7 @@ class SilencerPlugin(star.Star):
                 else:
                     in_time = start_val <= now_val < end_val
                 if not in_time:
-                    return "现在不是睡觉时间，睡不着喵"
+                    return "现在不是睡觉时间，睡不着"
             except:
                 pass
         if duration_minutes > 0:
@@ -480,7 +529,7 @@ class SilencerPlugin(star.Star):
         self._wake_tasks = [t for t in self._wake_tasks if not t.done()]
         self._wake_tasks.append(task)
         logger.info("已进入睡眠模式")
-        return "晚安...我去睡了，有什么事明天再说喵"
+        return "晚安...我去睡了，有什么事明天再说"
 
     @filter.command("拉黑")
     async def add_blacklist(self, event: AstrMessageEvent):

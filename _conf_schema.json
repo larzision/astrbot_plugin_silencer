@@ -111,7 +111,7 @@
   "sleep_end_time": {
     "description": "可睡眠时段-结束",
     "type": "string",
-    "hint": "格式 HH:MM，与开始时间形成区间",
+    "hint": "格式 HH:MM，与开始时间形成区间，其中一个留空则不限制",
     "default": ""
   },
   "sleep_duration_min": {
@@ -131,6 +131,12 @@
     "type": "list",
     "hint": "这些用户可传参覆盖时长",
     "default": []
+  },
+  "sleep_public": {
+    "description": "睡眠工具开放所有人",
+    "type": "bool",
+    "hint": "开启后非管理员也能让llm睡觉，建议仅在全局下关闭",
+    "default": false
   },
   "wake_inject_pos": {
     "description": "刚睡醒注入位置",

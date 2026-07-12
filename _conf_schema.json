@@ -17,12 +17,6 @@
     "hint": "关闭后所有消息正常回复",
     "default": true
   },
-  "admin_only": {
-    "description": "拉黑工具限管理员",
-    "type": "bool",
-    "hint": "可手动修改。开启后只有管理员才能拉黑",
-    "default": true
-  },
   "cmd_whitelist": {
     "description": "命令白名单",
     "type": "list",
@@ -144,11 +138,29 @@
     "hint": "开启后非管理员也能让llm睡觉，建议仅在全局下关闭",
     "default": false
   },
+  "wake_whitelist": {
+    "description": "唤醒白名单",
+    "type": "list",
+    "hint": "这些用户可发送wake唤醒bot，管理员默认有权限，防止全局状态下其他人中断睡眠",
+    "default": []
+  },
   "wake_inject_pos": {
     "description": "刚睡醒注入位置",
     "type": "string",
     "hint": "注入到对话开头还是系统提示末尾",
     "options": ["prompt", "system"],
     "default": "prompt"
+  },
+  "_peak_section": {
+    "description": "════ ⚡ 高峰期静默配置 ════",
+    "type": "string",
+    "hint": "DeepSeek峰谷定价期间自动静默",
+    "default": "--- 高峰期区 ---"
+  },
+  "peak_hours_enabled": {
+    "description": "启用高峰期自动静默",
+    "type": "bool",
+    "hint": "开启后9-12点和14-18点自动进入睡眠模式(应对deepseek高峰期收费方法)",
+    "default": false
   }
 }

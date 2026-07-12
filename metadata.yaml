@@ -1,6 +1,6 @@
 name: astrbot_plugin_silencer
-description: 勿扰zzz - 拉黑拦截+睡眠模式管理
-author: miko
-version: 1.7.0
+description: 勿扰zzz - 拉黑拦截+睡眠模式管理+高峰期自动静默。黑名单拉黑用户定时解除；睡眠期间消息缓存唤醒后回放为LLM事件，支持全局/单对话、白名单、自定义时长；高峰期静默应对DeepSeek峰谷定价。群聊缓存按sender分组回放，wake指令带权限控制。适用平台：aiocqhttp(NapCat)等。
+author: larzision&miko
+version: 1.8.0
 display_name: 勿扰zzz
 repo: https://github.com/larzision/astrbot_plugin_silencer

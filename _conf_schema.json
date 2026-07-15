@@ -41,6 +41,12 @@
     "hint": "单位:分钟。0不限制",
     "default": 120
   },
+  "llm_auto_block": {
+    "description": "LLM自主拉黑",
+    "type": "bool",
+    "hint": "开启后LLM可拉黑当前对话触发者，跨人拉黑需管理员权限",
+    "default": false
+  },
   "_sleep_section": {
     "description": "════ 🌙 睡眠模式配置 ════",
     "type": "string",

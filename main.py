@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import random
 import time as time_module
 from pathlib import Path
 
@@ -15,20 +16,29 @@ EXPIRY_PATH = Path("data/plugin_data/astrbot_plugin_silencer/expiry.json")
 CACHE_PATH = Path("data/plugin_data/astrbot_plugin_silencer/sleep_cache.json")
 
 
+SNAPSHOT_PATH = Path("data/plugin_data/astrbot_plugin_silencer/snapshot.json")
+
+
 def _load_expiry() -> dict:
     if EXPIRY_PATH.exists():
         try:
             with open(EXPIRY_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            if "expiry" in data:
+                return data
+            return {"expiry": data, "blacklist": []}
         except Exception:
-            return {}
-    return {}
+            return {"expiry": {}, "blacklist": []}
+    return {"expiry": {}, "blacklist": []}
 
 
-def _save_expiry(expiry: dict):
+def _save_expiry(expiry: dict, blacklist: list = None):
+    data = {"expiry": expiry}
+    if blacklist is not None:
+        data["blacklist"] = blacklist
     EXPIRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(EXPIRY_PATH, "w", encoding="utf-8") as f:
-        json.dump(expiry, f, ensure_ascii=False, indent=2)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
 def _load_cache() -> list:
@@ -47,16 +57,39 @@ def _save_cache(cache: list):
         json.dump(cache, f, ensure_ascii=False, indent=2)
 
 
+def _load_snapshot() -> dict:
+    if SNAPSHOT_PATH.exists():
+        try:
+            with open(SNAPSHOT_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
 
-@star.register("astrbot_plugin_silencer", "miko", "勿扰zzz - 拉黑拦截+睡眠模式管理", "1.7.0")
+
+def _save_snapshot(data: dict):
+    SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(SNAPSHOT_PATH, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+@star.register("astrbot_plugin_silencer", "miko", "勿扰zzz - 拉黑拦截+睡眠模式管理", "1.8.0")
 class SilencerPlugin(star.Star):
     def __init__(self, context: star.Context, config: AstrBotConfig = None) -> None:
         super().__init__(context)
         self.config = config or {}
         self.enabled: bool = self.config.get("blacklist_enabled", True)
+        self.admin_only: bool = self.config.get("admin_only", True)
         self.min_minutes: float = float(self.config.get("min_block_minutes", 0))
         self.max_minutes: float = float(self.config.get("max_block_minutes", 43200))
-        self._expiry: dict = _load_expiry()
+        loaded = _load_expiry()
+        self._expiry: dict = loaded.get("expiry", {})
+        saved_bl = loaded.get("blacklist", [])
+        if saved_bl:
+            current = self._get_list()
+            merged = list(dict.fromkeys(current + saved_bl))
+            if merged != current:
+                self._set_list(merged)
         self._clean_expired()
         self._clean_internal_config()
         # 兼容旧版sleep_until
@@ -66,61 +99,80 @@ class SilencerPlugin(star.Star):
         self._wake_tasks = []
         self._internal_sleep_change = False
         self._peak_task = None
+        snap = _load_snapshot()
+        self._old_sleep_mode = snap.get("old_sleep_mode")
+        self._old_sleep_sessions = snap.get("old_sleep_sessions")
+        self._old_peak_enabled = snap.get("old_peak_enabled")
+        self._old_sleep_until = snap.get("old_sleep_until")
+        self._sleep_saved_scope = snap.get("sleep_saved_scope", "")
         self._restore_timers()
         # 后台检测配置变更
         async def _config_watcher():
+            self._clean_internal_config()
             while True:
-                await asyncio.sleep(3)
+                await asyncio.sleep(10)
                 try:
                     if self._internal_sleep_change:
                         self._internal_sleep_change = False
-                        self.config["_old_sleep_mode"] = self.config.get("sleep_mode", False)
-                        self.config["_old_sleep_sessions"] = self.config.get("sleep_mode_sessions", [])
+                        self._old_sleep_mode = self.config.get("sleep_mode", False)
+                        self._old_sleep_sessions = self.config.get("sleep_mode_sessions", [])
+                        self._old_sleep_until = self._get_until_list()
                         continue
-                    old_mode = self.config.get("_old_sleep_mode")
-                    old_ss = self.config.get("_old_sleep_sessions")
-                    old_peak = self.config.get("_old_peak_enabled")
+                    old_mode = self._old_sleep_mode
+                    old_ss = self._old_sleep_sessions
+                    old_until = self._old_sleep_until
+                    old_peak = self._old_peak_enabled
                     cur_mode = self.config.get("sleep_mode", False)
                     cur_ss = self.config.get("sleep_mode_sessions", [])
+                    cur_until = self._get_until_list()
                     cur_peak = self.config.get("peak_hours_enabled", False)
                     if old_peak != cur_peak:
                         if cur_peak:
                             self._start_peak_watcher()
+                            now = time_module.localtime()
+                            now_m = now.tm_hour * 60 + now.tm_min
+                            if 9 * 60 <= now_m < 12 * 60:
+                                self._peak_sleep(12 * 60 - now_m)
+                            elif 14 * 60 <= now_m < 18 * 60:
+                                self._peak_sleep(18 * 60 - now_m)
                         else:
                             self._stop_peak_watcher()
-                    if old_mode is not None and old_ss is not None:
-                        if old_mode != cur_mode or old_ss != cur_ss:
-                            removed = []
-                            if old_mode != cur_mode:
-                                removed.append("global")
-                            if old_ss != cur_ss:
-                                removed = [s for s in old_ss if s not in cur_ss]
-                            cache = _load_cache()
-                            for s in removed:
-                                await self._execute_wake(s)
-                            if not removed:
-                                self._set_until_list([])
-                                self._cancel_all_tasks()
-                    self.config["_old_sleep_mode"] = cur_mode
-                    self.config["_old_sleep_sessions"] = cur_ss
-                    self.config["_old_peak_enabled"] = cur_peak
-                    try:
-                        self.config.save_config()
-                    except:
-                        pass
+                    if old_mode is not None and old_ss is not None and old_until is not None:
+                        wake_sessions = set()
+                        # 全局模式: sleep_mode true→false 则唤醒
+                        if old_mode and not cur_mode:
+                            wake_sessions.add("global")
+                        # 会话模式: 被移除的会话
+                        if old_ss != cur_ss:
+                            for s in old_ss:
+                                if s not in cur_ss:
+                                    wake_sessions.add(s)
+                        # 唤醒队列: 被移除的条目
+                        if old_until != cur_until:
+                            old_set = set(old_until)
+                            cur_set = set(cur_until)
+                            for entry in old_set - cur_set:
+                                sess = entry.split(":")[0]
+                                wake_sessions.add(sess)
+                        for s in wake_sessions:
+                            await self._execute_wake(s)
+                    self._old_sleep_mode = cur_mode
+                    self._old_sleep_sessions = cur_ss
+                    self._old_peak_enabled = cur_peak
+                    self._old_sleep_until = cur_until
+                    self._snapshot_save()
                 except:
                     pass
         asyncio.create_task(_config_watcher())
         # 启动时检查是否在高峰期
         if self.config.get("peak_hours_enabled", False):
             self._start_peak_watcher()
-            now_h = time_module.localtime().tm_hour
-            now_m = time_module.localtime().tm_min
-            if not self._is_sleeping():
-                if (now_h == 9 and now_m >= 0) or (9 < now_h < 12) or (now_h == 12 and now_m == 0):
-                    self._peak_sleep(180)
-                elif (now_h == 14 and now_m >= 0) or (14 < now_h < 18) or (now_h == 18 and now_m == 0):
-                    self._peak_sleep(240)
+            now = time_module.localtime()
+            now_m = now.tm_hour * 60 + now.tm_min
+            if 9 * 60 <= now_m < 12 * 60:
+                self._peak_sleep(12 * 60 - now_m)
+            elif 14 * 60 <= now_m < 18 * 60:
+                self._peak_sleep(18 * 60 - now_m)
         logger.info(f"勿扰zzz插件加载完成，当前黑名单: {self._get_list()}")
 
     # ── 唤醒时间列表操作 ──
@@ -132,7 +184,7 @@ class SilencerPlugin(star.Star):
     def _set_until_list(self, lst: list):
         self.config["sleep_until"] = lst
         try:
-            self.config.save_config()
+            self._config_save("set_until")
         except:
             pass
 
@@ -151,15 +203,17 @@ class SilencerPlugin(star.Star):
     def _is_sleeping(self, session: str = "") -> bool:
         scope = str(self.config.get("sleep_scope", "全局"))
         # scope变更时清空所有缓存和定时任务
-        saved = self.config.get("sleep_saved_scope", "")
+        saved = self._sleep_saved_scope
         if saved and saved != scope:
             _save_cache([])
             self._set_until_list([])
             self._sleep_clear()
+            self.config["sleep_mode_sessions"] = []
             self._cancel_all_tasks()
-            self.config["sleep_saved_scope"] = scope
+            self._sleep_saved_scope = scope
+            self._snapshot_save()
             try:
-                self.config.save_config()
+                self._config_save("scope_change")
             except:
                 pass
             logger.info("scope变更，已清空缓存")
@@ -171,7 +225,7 @@ class SilencerPlugin(star.Star):
         return bool(self.config.get("sleep_mode", False))
 
     def _sleep_enter(self, session: str):
-        scope = str(self.config.get("sleep_scope", "global"))
+        scope = str(self.config.get("sleep_scope", "全局"))
         if scope in ("session", "仅触发的对话"):
             lst = self.config.get("sleep_mode_sessions", [])
             if not isinstance(lst, list):
@@ -203,44 +257,61 @@ class SilencerPlugin(star.Star):
             self._remove_until("global")
 
     def _sleep_clear(self):
-        self.config["sleep_mode"] = []
+        self.config["sleep_mode"] = False
 
     # ── 高峰期自动静默 ──
 
     def _start_peak_watcher(self):
         if self._peak_task and not self._peak_task.done():
             return
-        self._peak_task = asyncio.create_task(self._peak_hours_watcher())
+        self._peak_task = asyncio.create_task(self._peak_scheduler())
 
     def _stop_peak_watcher(self):
         if self._peak_task and not self._peak_task.done():
             self._peak_task.cancel()
             self._peak_task = None
 
-    async def _peak_hours_watcher(self):
+    async def _peak_scheduler(self):
+        """精确到点触发高峰期，代替60秒轮询"""
+        DAY = 24 * 60
+        P1_S, P1_E = 9 * 60, 12 * 60
+        P2_S, P2_E = 14 * 60, 18 * 60
         while True:
-            await asyncio.sleep(60)
             try:
                 now = time_module.localtime()
-                h, m = now.tm_hour, now.tm_min
-                if m != 0:
-                    continue
-                if h == 9 and not self._is_sleeping():
-                    self._peak_sleep(180)
-                elif h == 14 and not self._is_sleeping():
-                    self._peak_sleep(240)
-            except:
-                pass
+                now_m = now.tm_hour * 60 + now.tm_min
+                n9 = (P1_S - now_m) % DAY
+                n14 = (P2_S - now_m) % DAY
+                if not n9: n9 = DAY
+                if not n14: n14 = DAY
+                if n9 <= n14:
+                    await asyncio.sleep(n9 * 60)
+                    self._peak_sleep(P1_E - P1_S)
+                else:
+                    await asyncio.sleep(n14 * 60)
+                    self._peak_sleep(P2_E - P2_S)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(60)
 
     def _peak_sleep(self, duration_minutes: float):
         session = "global"
         dur_h = duration_minutes / 60
         self._internal_sleep_change = True
+        self._cancel_all_tasks()
+        self._set_until_list([])
+        self.config["sleep_mode_sessions"] = []
+        # 暂存原scope，强制全局（已有则不覆盖，防重载丢失）
+        if "peak_original_scope" not in self.config:
+            self.config["peak_original_scope"] = self.config.get("sleep_scope", "全局")
+        self.config["sleep_scope"] = "全局"
+        self._sleep_saved_scope = "全局"
+        self._snapshot_save()
         self.config["sleep_mode"] = True
-        self.config["sleep_umo"] = session
         self._add_until("global", time_module.time() + dur_h * 3600)
         try:
-            self.config.save_config()
+            self._config_save("peak_sleep")
         except Exception as e:
             logger.warning(f"高峰期静默保存配置失败: {e}")
 
@@ -296,14 +367,29 @@ class SilencerPlugin(star.Star):
                     pass
             self._wake_tasks = []
 
-    def _clean_internal_config(self):
-        for k in list(self.config.keys()):
-            if k.startswith("pre-config:") or k in ("sleep_umo", "sleep_sender_id", "just_woke_up", "just_wake_up"):
-                del self.config[k]
+    def _config_save(self, tag: str = ""):
         try:
             self.config.save_config()
         except:
             pass
+
+    def _snapshot_save(self):
+        _save_snapshot({
+            "old_sleep_mode": self._old_sleep_mode,
+            "old_sleep_sessions": self._old_sleep_sessions,
+            "old_peak_enabled": self._old_peak_enabled,
+            "old_sleep_until": self._old_sleep_until,
+            "sleep_saved_scope": self._sleep_saved_scope,
+        })
+
+    def _clean_internal_config(self):
+        dirty = False
+        for k in list(self.config.keys()):
+            if k.startswith("pre-config:") or k in ("just_woke_up", "_old_sleep_mode", "_old_sleep_sessions", "_old_peak_enabled", "sleep_saved_scope"):
+                del self.config[k]
+                dirty = True
+        if dirty:
+            self._config_save("clean_internal")
 
     def _get_list(self) -> list:
         return self.config.get("blacklist", [])
@@ -311,7 +397,7 @@ class SilencerPlugin(star.Star):
     def _set_list(self, blacklist: list):
         self.config["blacklist"] = blacklist
         try:
-            self.config.save_config()
+            self._config_save("set_blacklist")
         except Exception as e:
             logger.warning(f"保存配置失败: {e}")
 
@@ -335,7 +421,7 @@ class SilencerPlugin(star.Star):
         if changed:
             self._set_list(new_blacklist)
             self._expiry = new_expiry
-            _save_expiry(self._expiry)
+            _save_expiry(self._expiry, self._get_list())
 
     async def _execute_wake(self, umo: str):
         """执行唤醒"""
@@ -343,12 +429,19 @@ class SilencerPlugin(star.Star):
         self._remove_until(umo)
         self._remove_until("global")
         # 直接设置睡眠状态，不调 _sleep_leave 避免递归
-        self.config["sleep_mode"] = False
-        self.config["sleep_mode_sessions"] = []
+        scope = str(self.config.get("sleep_scope", "全局"))
+        if scope in ("session", "仅触发的对话") and umo != "global":
+            lst = self.config.get("sleep_mode_sessions", [])
+            if isinstance(lst, list) and umo in lst:
+                lst.remove(umo)
+            self.config["sleep_mode_sessions"] = lst
+        else:
+            self.config["sleep_mode"] = False
+            self.config["sleep_mode_sessions"] = []
         cache = _load_cache()
         _save_cache([])
         try:
-            self.config.save_config()
+            self._config_save("execute_wake")
         except:
             pass
         if cache:
@@ -356,7 +449,7 @@ class SilencerPlugin(star.Star):
             from astrbot.core.platform.message_type import MessageType
             from astrbot.api.message_components import Plain
             _scope = str(self.config.get("sleep_scope", "全局"))
-            if _scope in ("session", "仅触发的对话"):
+            if _scope in ("session", "仅触发的对话") and umo != "global":
                 cache = [c for c in cache if c.get("session") == umo]
             # 私聊按会话合并 群聊按会话+sender合并
             _groups = {}
@@ -400,6 +493,17 @@ class SilencerPlugin(star.Star):
                         p.commit_event(_evt)
                         break
         logger.info("唤醒执行完毕")
+        # 高峰期结束后恢复原scope
+        orig = self.config.get("peak_original_scope", "")
+        if orig:
+            self.config["sleep_scope"] = orig
+            self._sleep_saved_scope = orig
+            self._snapshot_save()
+            del self.config["peak_original_scope"]
+            try:
+                self._config_save("wake_peak_restore")
+            except:
+                pass
 
     @filter.on_llm_request()
     async def check_blacklist(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -414,14 +518,14 @@ class SilencerPlugin(star.Star):
             self._set_until_list([])
             self._cancel_all_tasks()
             try:
-                self.config.save_config()
+                self._config_save("sleep_cleanup")
             except:
                 pass
         # 刚睡醒注入
         if self.config.get("just_woke_up", False):
             self.config["just_woke_up"] = False
             try:
-                self.config.save_config()
+                self._config_save("just_woke_up")
             except:
                 pass
             tag = "提示:你刚睡醒，以下是你睡着时收到的信息"
@@ -454,7 +558,7 @@ class SilencerPlugin(star.Star):
                     _waker = event.get_sender_id()
                     _admins = self.config.get("wake_whitelist", [])
                     _role = getattr(event, 'role', None)
-                    if _role != "admin" and _waker not in _admins:
+                    if _role not in ("admin",) and _waker not in _admins:
                         logger.info(f"唤醒权限不足: {_waker}")
                         event.call_llm = False
                         event.stop_event()
@@ -462,7 +566,7 @@ class SilencerPlugin(star.Star):
                     self.config["just_woke_up"] = True
                     await self._execute_wake(session)
                     try:
-                        self.config.save_config()
+                        self._config_save("wake_cmd")
                     except:
                         pass
                     return
@@ -527,11 +631,15 @@ class SilencerPlugin(star.Star):
             user_id(string): 需要拉黑的用户ID。可以从对话历史、群成员信息或@内容中提取
             duration_minutes(number): 拉黑时长(分钟)，0表示自动按配置区间。可选参数，默认0
         '''
-        role = getattr(event, 'role', None)
-        sid = getattr(event, 'get_sender_id', lambda: '')()
-        wl = self.config.get("cmd_whitelist", [])
-        if role != "admin" and sid not in wl:
-            return "权限不足"
+        if not self.config.get("llm_auto_block", False):
+            role = getattr(event, 'role', None)
+            sid = getattr(event, 'get_sender_id', lambda: '')()
+            wl = self.config.get("cmd_whitelist", [])
+            if self.admin_only and role not in ("admin",) and sid not in wl:
+                return "权限不足"
+        immune = self.config.get("immune_list", [])
+        if user_id in immune:
+            return f"{user_id} 受免疫名单保护，无法拉黑"
         blacklist = self._get_list()
         if user_id in blacklist:
             exp = self._expiry.get(user_id)
@@ -545,7 +653,7 @@ class SilencerPlugin(star.Star):
             mx = self.max_minutes or 1440
             if mx < mn:
                 mx = mn
-            duration_minutes = mn + (mx - mn) * (time_module.time() % 100 / 100)
+            duration_minutes = random.uniform(mn, mx)
         # 限制在配置范围内
         if self.min_minutes > 0 and duration_minutes < self.min_minutes:
             duration_minutes = self.min_minutes
@@ -555,13 +663,13 @@ class SilencerPlugin(star.Star):
         if duration_minutes > 0:
             self._expiry[user_id] = time_module.time() + duration_minutes * 60
             self._set_list(blacklist)
-            _save_expiry(self._expiry)
+            _save_expiry(self._expiry, self._get_list())
             logger.info(f"已拉黑用户: {user_id}，时长{duration_minutes}分钟")
             return f"已拉黑 {user_id}，{duration_minutes}分钟后自动放行"
         else:
             self._expiry.pop(user_id, None)
             self._set_list(blacklist)
-            _save_expiry(self._expiry)
+            _save_expiry(self._expiry, self._get_list())
             logger.info(f"已永久拉黑用户: {user_id}")
             return f"已永久拉黑 {user_id}"
 
@@ -573,18 +681,26 @@ class SilencerPlugin(star.Star):
         Args:
             user_id(string): 需要取消拉黑的用户ID
         '''
-        role = getattr(event, 'role', None)
-        sid = getattr(event, 'get_sender_id', lambda: '')()
-        wl = self.config.get("cmd_whitelist", [])
-        if role != "admin" and sid not in wl:
-            return "权限不足"
+        if self.config.get("llm_auto_block", False):
+            sid = str(event.get_sender_id())
+            if user_id != sid:
+                role = getattr(event, 'role', None)
+                wl = self.config.get("cmd_whitelist", [])
+                if self.admin_only and role not in ("admin",) and sid not in wl:
+                    return "权限不足"
+        else:
+            role = getattr(event, 'role', None)
+            sid = getattr(event, 'get_sender_id', lambda: '')()
+            wl = self.config.get("cmd_whitelist", [])
+            if self.admin_only and role not in ("admin",) and sid not in wl:
+                return "权限不足"
         blacklist = self._get_list()
         if user_id not in blacklist:
             return f"{user_id} 不在黑名单里"
         blacklist.remove(user_id)
         self._expiry.pop(user_id, None)
         self._set_list(blacklist)
-        _save_expiry(self._expiry)
+        _save_expiry(self._expiry, self._get_list())
         logger.info(f"已取消拉黑用户: {user_id}")
         return f"已取消拉黑 {user_id}"
 
@@ -597,7 +713,7 @@ class SilencerPlugin(star.Star):
             duration_minutes(number): 睡眠时长(分钟)。不传参时必须传0；传0或留空则自动随机。仅管理员和sleep_custom_users可指定时长。可选参数，默认0
         '''
         role = getattr(event, 'role', None)
-        if not self.config.get("sleep_public", False) and self.admin_only and role is not None and role != "admin":
+        if not self.config.get("sleep_public", False) and self.admin_only and role not in ("admin",):
             return "权限不足"
         start_t = self.config.get("sleep_start_time", "")
         end_t = self.config.get("sleep_end_time", "")
@@ -639,7 +755,7 @@ class SilencerPlugin(star.Star):
             dur_max = float(self.config.get("sleep_duration_max", 3))
             if dur_max < dur_min:
                 dur_max = dur_min
-            dur_h = dur_min + (dur_max - dur_min) * (time_module.time() % 100 / 100)
+            dur_h = random.uniform(dur_min, dur_max)
         session = ""
         try:
             session = event.context.event.unified_msg_origin
@@ -650,15 +766,15 @@ class SilencerPlugin(star.Star):
                 session = ""
         self._internal_sleep_change = True
         self._sleep_enter(session)
-        self.config["sleep_umo"] = session
-        scope = str(self.config.get("sleep_scope", "global"))
-        self.config["sleep_saved_scope"] = scope
+        scope = str(self.config.get("sleep_scope", "全局"))
+        self._sleep_saved_scope = scope
+        self._snapshot_save()
         if scope in ("session", "仅触发的对话"):
             self._add_until(session, time_module.time() + dur_h * 3600)
         else:
             self._add_until("global", time_module.time() + dur_h * 3600)
         try:
-            self.config.save_config()
+            self._config_save("go_sleep")
         except Exception as e:
             logger.warning(f"保存配置失败: {e}")
         async def _auto_wake():
@@ -681,9 +797,8 @@ class SilencerPlugin(star.Star):
         sid = event.get_sender_id()
         role = getattr(event, 'role', None)
         wl = self.config.get("cmd_whitelist", [])
-        if self.admin_only and role != "admin" and sid not in wl:
+        if self.admin_only and role not in ("admin",) and sid not in wl:
             yield event.plain_result("权限不足")
-            return
             return
         # 尝试从消息链提取at
         target = ""
@@ -717,12 +832,12 @@ class SilencerPlugin(star.Star):
         if minutes > 0:
             self._expiry[target] = time_module.time() + minutes * 60
             self._set_list(blacklist)
-            _save_expiry(self._expiry)
+            _save_expiry(self._expiry, self._get_list())
             yield event.plain_result(f"已拉黑 {target}，{minutes}分钟后自动放行")
         else:
             self._expiry.pop(target, None)
             self._set_list(blacklist)
-            _save_expiry(self._expiry)
+            _save_expiry(self._expiry, self._get_list())
             yield event.plain_result(f"已永久拉黑 {target}")
 
     @filter.command("取消拉黑")
@@ -730,7 +845,7 @@ class SilencerPlugin(star.Star):
         sid = event.get_sender_id()
         role = getattr(event, 'role', None)
         wl = self.config.get("cmd_whitelist", [])
-        if self.admin_only and role != "admin" and sid not in wl:
+        if self.admin_only and role not in ("admin",) and sid not in wl:
             yield event.plain_result("权限不足")
             return
         target = ""
@@ -752,7 +867,7 @@ class SilencerPlugin(star.Star):
         blacklist.remove(target)
         self._expiry.pop(target, None)
         self._set_list(blacklist)
-        _save_expiry(self._expiry)
+        _save_expiry(self._expiry, self._get_list())
         yield event.plain_result(f"已取消拉黑 {target}")
 
     @filter.command("黑名单")

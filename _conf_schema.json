@@ -8,43 +8,49 @@
   "blacklist": {
     "description": "黑名单用户ID列表",
     "type": "list",
-    "hint": "输入需要拉黑的用户ID，多个用逗号分隔",
+    "hint": "被拉黑的用户ID，每来一条消息都会检查是否在此列表中",
     "default": []
   },
   "blacklist_enabled": {
     "description": "启用黑名单功能",
     "type": "bool",
-    "hint": "关闭后所有消息正常回复",
+    "hint": "总开关，关闭后 block_user/unblock_user 工具停用(LLM看不到)，拉黑/取消拉黑命令也拒绝执行。需重载插件生效",
+    "default": true
+  },
+  "admin_only": {
+    "description": "限管理员操作",
+    "type": "bool",
+    "hint": "开启后只有管理员和 cmd_whitelist 能拉黑/取消拉黑。关闭则所有人都能用命令操作",
     "default": true
   },
   "cmd_whitelist": {
     "description": "命令白名单",
     "type": "list",
-    "hint": "可手动修改。这些用户可用拉黑/取消拉黑命令",
+    "hint": "即使不是管理员，只要在此列表中就能用 拉黑/取消拉黑 命令",
     "default": []
   },
   "immune_list": {
-    "description": "免疫名单(免黑名单)",
+    "description": "免疫名单",
     "type": "list",
-    "hint": "这些用户即使被拉黑也不会被拦截",
+    "hint": "此列表中的用户既无法被拉黑，也不会被黑名单拦截。优先级高于黑名单",
     "default": []
   },
   "min_block_minutes": {
     "description": "最短拉黑时长",
     "type": "float",
-    "hint": "单位:分钟。0不限制",
+    "hint": "单位:分钟。未指定时长时在 min~max 间随机。设为 0 不限制",
     "default": 5
   },
   "max_block_minutes": {
     "description": "最长拉黑时长",
     "type": "float",
-    "hint": "单位:分钟。0不限制",
+    "hint": "单位:分钟。未指定时长时在 min~max 间随机。设为 0 不限制",
     "default": 120
   },
   "llm_auto_block": {
     "description": "LLM自主拉黑",
     "type": "bool",
-    "hint": "开启后LLM可拉黑当前对话触发者，跨人拉黑需管理员权限",
+    "hint": "开启后LLM调用 block_user 无需权限检查，可拉黑任何人。但 unblock_user 只能解封自己（管理员除外）",
     "default": false
   },
   "_sleep_section": {
@@ -56,105 +62,105 @@
   "sleep_mode_enabled": {
     "description": "启用睡眠模式",
     "type": "bool",
-    "hint": "关闭后睡眠不拦截消息",
+    "hint": "总开关，关闭后 go_to_sleep 工具停用(LLM看不到)，睡眠拦截也失效。需重载插件生效",
     "default": true
   },
   "sleep_scope": {
     "description": "睡眠作用范围",
     "type": "string",
     "options": ["全局", "仅触发的对话"],
-    "hint": "全局=所有对话，仅触发的对话=只在当前对话",
+    "hint": "全局：一睡所有对话停；仅触发的对话：只睡当前会话，其他照常。切换范围会清空所有睡眠状态和缓存",
     "default": "全局"
   },
   "sleep_mode": {
     "description": "全局睡眠状态",
     "type": "bool",
-    "hint": "工具控制，全局模式时有效",
+    "hint": "工具自动控制。但你手动改成 false 也能触发唤醒，后台10秒内检测到就会醒",
     "default": false
   },
   "sleep_mode_sessions": {
     "description": "会话级睡眠状态",
     "type": "list",
-    "hint": "工具控制，修改则开始处理对应对话。session模式时有效",
+    "hint": "工具自动控制。手动删掉某个会话也会触发唤醒，sleep_scope 设为 session 模式时有效",
     "default": []
   },
   "sleep_until": {
     "description": "自动唤醒队列",
     "type": "list",
-    "hint": "工具控制，仅供查看禁止修改。每条格式 会话ID:时间戳",
+    "hint": "工具自动维护。格式: 会话ID:Unix时间戳。可手动增删来触发或取消唤醒",
     "default": []
   },
   "sleep_whitelist": {
     "description": "睡眠白名单",
     "type": "list",
-    "hint": "全局模式睡觉期间也能打扰的人",
+    "hint": "不管全局睡还是会话睡，这些用户的消息都不拦，正常回复",
     "default": []
   },
   "sleep_disabled_sessions": {
     "description": "关闭睡眠的对话",
     "type": "list",
-    "hint": "填对话ID，这些对话睡眠不生效",
+    "hint": "填入会话ID后该对话永不进入睡眠，哪怕全局睡了也照常回复",
     "default": []
   },
   "sleep_max_cache": {
     "description": "每会话缓存上限",
     "type": "int",
-    "hint": "每个对话缓存几条消息，推荐1~5",
+    "hint": "每个对话最多缓存几条消息，超出丢弃最旧的。设为 0 不缓存（消息直接丢掉）",
     "default": 3
   },
   "sleep_max_total": {
     "description": "总会话缓存上限",
     "type": "int",
-    "hint": "最多缓存几个对话，0不限制",
+    "hint": "最多缓存几个不同会话，超出则丢弃最早进入的那个会话的全部缓存。设为 0 不限制",
     "default": 5
   },
   "sleep_start_time": {
     "description": "可睡眠时段-开始",
     "type": "string",
-    "hint": "格式 HH:MM，与结束时间形成区间",
+    "hint": "格式 HH:MM，比如 23:00。限定普通睡眠的允许时段，支持跨天。留空不限制。高峰期静默不受此约束",
     "default": ""
   },
   "sleep_end_time": {
     "description": "可睡眠时段-结束",
     "type": "string",
-    "hint": "格式 HH:MM，与开始时间形成区间，其中一个留空则不限制",
+    "hint": "格式 HH:MM，比如 08:00。支持跨天。留空不限制。高峰期静默不受此约束",
     "default": ""
   },
   "sleep_duration_min": {
     "description": "最短睡眠时长",
     "type": "float",
-    "hint": "单位:小时。实际在此区间随机",
+    "hint": "单位:小时。不传时长时在 min~max 间随机",
     "default": 2
   },
   "sleep_duration_max": {
     "description": "最长睡眠时长",
     "type": "float",
-    "hint": "单位:小时。实际在此区间随机",
+    "hint": "单位:小时。不传时长时在 min~max 间随机",
     "default": 3
   },
   "sleep_custom_users": {
     "description": "可指定睡眠时长用户",
     "type": "list",
-    "hint": "这些用户可传参覆盖时长",
+    "hint": "这些用户调用 go_to_sleep 时可以自己指定睡多久，传多少睡多少。管理员不受此限制",
     "default": []
   },
   "sleep_public": {
     "description": "睡眠工具开放所有人",
     "type": "bool",
-    "hint": "开启后非管理员也能让llm睡觉，建议仅在全局下关闭",
+    "hint": "开启后任何人都能让 bot 睡觉（无视 admin_only）。关闭时走 admin_only 规则，建议在全局模式下关闭",
     "default": false
   },
   "wake_whitelist": {
     "description": "唤醒白名单",
     "type": "list",
-    "hint": "这些用户可发送wake唤醒bot，管理员默认有权限，防止全局状态下其他人中断睡眠",
+    "hint": "这些用户可以发 wake 叫醒 bot。管理员默认有权限，不需要加到这里",
     "default": []
   },
   "wake_inject_pos": {
     "description": "刚睡醒注入位置",
     "type": "string",
-    "hint": "注入到对话开头还是系统提示末尾",
     "options": ["prompt", "system"],
+    "hint": "prompt：追加到用户消息前面。system：追加到系统提示词末尾",
     "default": "prompt"
   },
   "_peak_section": {
@@ -166,7 +172,7 @@
   "peak_hours_enabled": {
     "description": "启用高峰期自动静默",
     "type": "bool",
-    "hint": "开启后9-12点和14-18点自动进入睡眠模式(应对deepseek高峰期收费方法)",
+    "hint": "开启后每天 9:00-12:00 和 14:00-18:00 强制全局睡眠（无视 sleep_scope 和可睡眠时段限制）。高峰期结束自动恢复原 scope。启动时若在高峰期会立刻补睡剩余时长",
     "default": false
   }
 }

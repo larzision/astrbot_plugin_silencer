@@ -80,8 +80,8 @@ class SilencerPlugin(star.Star):
         self.config = config or {}
         self.enabled: bool = self.config.get("blacklist_enabled", True)
         self.admin_only: bool = self.config.get("admin_only", True)
-        self.min_minutes: float = float(self.config.get("min_block_minutes", 0))
-        self.max_minutes: float = float(self.config.get("max_block_minutes", 43200))
+        self.min_minutes: float = float(self.config.get("min_block_minutes", 5))
+        self.max_minutes: float = float(self.config.get("max_block_minutes", 120))
         loaded = _load_expiry()
         self._expiry: dict = loaded.get("expiry", {})
         saved_bl = loaded.get("blacklist", [])
@@ -174,6 +174,7 @@ class SilencerPlugin(star.Star):
             elif 14 * 60 <= now_m < 18 * 60:
                 self._peak_sleep(18 * 60 - now_m)
         logger.info(f"勿扰zzz插件加载完成，当前黑名单: {self._get_list()}")
+        self._sync_tool_states()
 
     # ── 唤醒时间列表操作 ──
 
@@ -223,6 +224,27 @@ class SilencerPlugin(star.Star):
                 return bool(lst)
             return session in lst
         return bool(self.config.get("sleep_mode", False))
+
+    def _sync_tool_states(self):
+        """根据 blacklist_enabled 和 sleep_mode_enabled 同步工具激活状态"""
+        bl_enabled = self.config.get("blacklist_enabled", True)
+        sl_enabled = self.config.get("sleep_mode_enabled", True)
+        try:
+            if bl_enabled:
+                self.context.activate_llm_tool("block_user")
+                self.context.activate_llm_tool("unblock_user")
+            else:
+                self.context.deactivate_llm_tool("block_user")
+                self.context.deactivate_llm_tool("unblock_user")
+        except Exception as e:
+            logger.warning(f"同步黑名单工具状态失败: {e}")
+        try:
+            if sl_enabled:
+                self.context.activate_llm_tool("go_to_sleep")
+            else:
+                self.context.deactivate_llm_tool("go_to_sleep")
+        except Exception as e:
+            logger.warning(f"同步睡眠工具状态失败: {e}")
 
     def _sleep_enter(self, session: str):
         scope = str(self.config.get("sleep_scope", "全局"))
@@ -631,22 +653,24 @@ class SilencerPlugin(star.Star):
             user_id(string): 需要拉黑的用户ID。可以从对话历史、群成员信息或@内容中提取
             duration_minutes(number): 拉黑时长(分钟)，0表示自动按配置区间。可选参数，默认0
         '''
+        if not self.config.get("blacklist_enabled", True):
+            return "黑名单没开，拉不了"
         if not self.config.get("llm_auto_block", False):
             role = getattr(event, 'role', None)
             sid = getattr(event, 'get_sender_id', lambda: '')()
             wl = self.config.get("cmd_whitelist", [])
             if self.admin_only and role not in ("admin",) and sid not in wl:
-                return "权限不足"
+                return "你又不是管理员，拉不了"
         immune = self.config.get("immune_list", [])
         if user_id in immune:
-            return f"{user_id} 受免疫名单保护，无法拉黑"
+            return f"{user_id} 动不了，有免死金牌"
         blacklist = self._get_list()
         if user_id in blacklist:
             exp = self._expiry.get(user_id)
             if exp:
                 left = int((exp - time_module.time()) / 60)
-                return f"{user_id} 已在黑名单中，剩余约{left}分钟"
-            return f"{user_id} 已经在黑名单里了(永久)"
+                return f"{user_id} 早就在黑名单里了，剩{left}分钟"
+            return f"{user_id} 早就永久拉黑了"
         # 未指定时长时从配置区间随机
         if duration_minutes <= 0:
             mn = self.min_minutes or 30
@@ -665,13 +689,13 @@ class SilencerPlugin(star.Star):
             self._set_list(blacklist)
             _save_expiry(self._expiry, self._get_list())
             logger.info(f"已拉黑用户: {user_id}，时长{duration_minutes}分钟")
-            return f"已拉黑 {user_id}，{duration_minutes}分钟后自动放行"
+            return f"拉黑了，{duration_minutes}分钟后自动放出来"
         else:
             self._expiry.pop(user_id, None)
             self._set_list(blacklist)
             _save_expiry(self._expiry, self._get_list())
             logger.info(f"已永久拉黑用户: {user_id}")
-            return f"已永久拉黑 {user_id}"
+            return f"永久拉黑了，别想出来"
 
     @filter.llm_tool(name="unblock_user")
     async def unblock_user(self, event: AstrMessageEvent, user_id: str):
@@ -681,28 +705,30 @@ class SilencerPlugin(star.Star):
         Args:
             user_id(string): 需要取消拉黑的用户ID
         '''
+        if not self.config.get("blacklist_enabled", True):
+            return "黑名单没开，放不了"
         if self.config.get("llm_auto_block", False):
             sid = str(event.get_sender_id())
             if user_id != sid:
                 role = getattr(event, 'role', None)
                 wl = self.config.get("cmd_whitelist", [])
                 if self.admin_only and role not in ("admin",) and sid not in wl:
-                    return "权限不足"
+                    return "你又不是管理员，放不了"
         else:
             role = getattr(event, 'role', None)
             sid = getattr(event, 'get_sender_id', lambda: '')()
             wl = self.config.get("cmd_whitelist", [])
             if self.admin_only and role not in ("admin",) and sid not in wl:
-                return "权限不足"
+                return "你又不是管理员，放不了"
         blacklist = self._get_list()
         if user_id not in blacklist:
-            return f"{user_id} 不在黑名单里"
+            return f"{user_id} 本来就没在黑名单里"
         blacklist.remove(user_id)
         self._expiry.pop(user_id, None)
         self._set_list(blacklist)
         _save_expiry(self._expiry, self._get_list())
         logger.info(f"已取消拉黑用户: {user_id}")
-        return f"已取消拉黑 {user_id}"
+        return f"放出来了"
 
     @filter.llm_tool(name="go_to_sleep")
     async def go_to_sleep(self, event: AstrMessageEvent, duration_minutes: float = 0):
@@ -712,9 +738,11 @@ class SilencerPlugin(star.Star):
         Args:
             duration_minutes(number): 睡眠时长(分钟)。不传参时必须传0；传0或留空则自动随机。仅管理员和sleep_custom_users可指定时长。可选参数，默认0
         '''
+        if not self.config.get("sleep_mode_enabled", True):
+            return "睡眠关了，睡不着"
         role = getattr(event, 'role', None)
         if not self.config.get("sleep_public", False) and self.admin_only and role not in ("admin",):
-            return "权限不足"
+            return "你谁啊，我又不是你家的"
         start_t = self.config.get("sleep_start_time", "")
         end_t = self.config.get("sleep_end_time", "")
         if start_t and end_t:
@@ -794,11 +822,14 @@ class SilencerPlugin(star.Star):
 
     @filter.command("拉黑")
     async def add_blacklist(self, event: AstrMessageEvent):
+        if not self.config.get("blacklist_enabled", True):
+            yield event.plain_result("黑名单没开，拉不了")
+            return
         sid = event.get_sender_id()
         role = getattr(event, 'role', None)
         wl = self.config.get("cmd_whitelist", [])
         if self.admin_only and role not in ("admin",) and sid not in wl:
-            yield event.plain_result("权限不足")
+            yield event.plain_result("你又不是管理员，拉不了")
             return
         # 尝试从消息链提取at
         target = ""
@@ -842,11 +873,14 @@ class SilencerPlugin(star.Star):
 
     @filter.command("取消拉黑")
     async def remove_blacklist(self, event: AstrMessageEvent):
+        if not self.config.get("blacklist_enabled", True):
+            yield event.plain_result("黑名单没开，放不了")
+            return
         sid = event.get_sender_id()
         role = getattr(event, 'role', None)
         wl = self.config.get("cmd_whitelist", [])
         if self.admin_only and role not in ("admin",) and sid not in wl:
-            yield event.plain_result("权限不足")
+            yield event.plain_result("你又不是管理员，放不了")
             return
         target = ""
         for comp in event.get_messages():

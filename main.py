@@ -19,61 +19,53 @@ CACHE_PATH = Path("data/plugin_data/astrbot_plugin_silencer/sleep_cache.json")
 SNAPSHOT_PATH = Path("data/plugin_data/astrbot_plugin_silencer/snapshot.json")
 
 
-def _load_expiry() -> dict:
-    if EXPIRY_PATH.exists():
+def _load_json(path: Path, default):
+    if path.exists():
         try:
-            with open(EXPIRY_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if "expiry" in data:
-                return data
-            return {"expiry": data, "blacklist": []}
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
         except Exception:
-            return {"expiry": {}, "blacklist": []}
-    return {"expiry": {}, "blacklist": []}
+            pass
+    return default
+
+
+def _save_json(path: Path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def _load_expiry() -> dict:
+    data = _load_json(EXPIRY_PATH, {})
+    if "expiry" in data:
+        return data
+    return {"expiry": data, "blacklist": []}
 
 
 def _save_expiry(expiry: dict, blacklist: list = None):
     data = {"expiry": expiry}
     if blacklist is not None:
         data["blacklist"] = blacklist
-    EXPIRY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(EXPIRY_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _save_json(EXPIRY_PATH, data)
 
 
 def _load_cache() -> list:
-    if CACHE_PATH.exists():
-        try:
-            with open(CACHE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-    return []
+    return _load_json(CACHE_PATH, [])
 
 
 def _save_cache(cache: list):
-    CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(CACHE_PATH, "w", encoding="utf-8") as f:
-        json.dump(cache, f, ensure_ascii=False, indent=2)
+    _save_json(CACHE_PATH, cache)
 
 
 def _load_snapshot() -> dict:
-    if SNAPSHOT_PATH.exists():
-        try:
-            with open(SNAPSHOT_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    return _load_json(SNAPSHOT_PATH, {})
 
 
 def _save_snapshot(data: dict):
-    SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(SNAPSHOT_PATH, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    _save_json(SNAPSHOT_PATH, data)
 
 
-@star.register("astrbot_plugin_silencer", "miko", "勿扰zzz - 拉黑拦截+睡眠模式管理", "1.8.0")
+@star.register("astrbot_plugin_silencer", "miko", "勿扰zzz - 拉黑拦截+睡眠模式管理", "1.8.1")
 class SilencerPlugin(star.Star):
     def __init__(self, context: star.Context, config: AstrBotConfig = None) -> None:
         super().__init__(context)
@@ -105,6 +97,7 @@ class SilencerPlugin(star.Star):
         self._old_peak_enabled = snap.get("old_peak_enabled")
         self._old_sleep_until = snap.get("old_sleep_until")
         self._sleep_saved_scope = snap.get("sleep_saved_scope", "")
+        self._peak_original_scope = snap.get("peak_original_scope", "")
         self._restore_timers()
         # 后台检测配置变更
         async def _config_watcher():
@@ -129,12 +122,7 @@ class SilencerPlugin(star.Star):
                     if old_peak != cur_peak:
                         if cur_peak:
                             self._start_peak_watcher()
-                            now = time_module.localtime()
-                            now_m = now.tm_hour * 60 + now.tm_min
-                            if 9 * 60 <= now_m < 12 * 60:
-                                self._peak_sleep(12 * 60 - now_m)
-                            elif 14 * 60 <= now_m < 18 * 60:
-                                self._peak_sleep(18 * 60 - now_m)
+                            self._peak_fill(check_sleeping=False)
                         else:
                             self._stop_peak_watcher()
                     if old_mode is not None and old_ss is not None and old_until is not None:
@@ -167,14 +155,72 @@ class SilencerPlugin(star.Star):
         # 启动时检查是否在高峰期
         if self.config.get("peak_hours_enabled", False):
             self._start_peak_watcher()
-            now = time_module.localtime()
-            now_m = now.tm_hour * 60 + now.tm_min
-            if 9 * 60 <= now_m < 12 * 60:
-                self._peak_sleep(12 * 60 - now_m)
-            elif 14 * 60 <= now_m < 18 * 60:
-                self._peak_sleep(18 * 60 - now_m)
+            self._peak_fill(check_sleeping=False)
         logger.info(f"勿扰zzz插件加载完成，当前黑名单: {self._get_list()}")
         self._sync_tool_states()
+        # 注册官方插件 Pages API
+        if hasattr(self.context, "register_web_api"):
+            try:
+                self.context.register_web_api(
+                    "/astrbot_plugin_silencer/page/status",
+                    self.page_status,
+                    ["GET"],
+                    "勿扰zzz 状态查询",
+                )
+                self.context.register_web_api(
+                    "/astrbot_plugin_silencer/page/cache/delete",
+                    self.page_cache_delete,
+                    ["POST"],
+                    "删除单条缓存消息",
+                )
+                self.context.register_web_api(
+                    "/astrbot_plugin_silencer/page/cache/clear",
+                    self.page_cache_clear,
+                    ["POST"],
+                    "清空全部缓存消息",
+                )
+                self.context.register_web_api(
+                    "/astrbot_plugin_silencer/page/cache/replay",
+                    self.page_cache_replay,
+                    ["POST"],
+                    "回放单条缓存消息",
+                )
+                logger.info("勿扰zzz 插件 Pages API 已注册")
+            except Exception as e:
+                logger.warning(f"勿扰zzz 插件 Pages API 注册失败: {e}")
+
+    async def page_status(self):
+        """插件 Pages API: 返回黑名单/睡眠/缓存状态"""
+        now = time_module.time()
+        expiry = {}
+        for uid, ts in (self._expiry or {}).items():
+            expiry[uid] = {
+                "expire_at": ts,
+                "left_minutes": round(max(0, float(ts) - now) / 60, 1),
+            }
+        return {
+            "blacklist": {
+                "enabled": self.config.get("blacklist_enabled", True),
+                "list": self._get_list(),
+                "expiry": expiry,
+                "immune_list": self.config.get("immune_list", []),
+            },
+            "sleep": {
+                "enabled": self.config.get("sleep_mode_enabled", True),
+                "scope": self.config.get("sleep_scope", "全局"),
+                "sleeping": self._is_sleeping(),
+                "sessions": self.config.get("sleep_mode_sessions", []),
+                "until": self._get_until_list(),
+                "start_time": self.config.get("sleep_start_time", ""),
+                "end_time": self.config.get("sleep_end_time", ""),
+                "whitelist": self.config.get("sleep_whitelist", []),
+            },
+            "peak_hours": {
+                "enabled": self.config.get("peak_hours_enabled", False),
+            },
+            "cache": self._get_cache(),
+            "server_time": now,
+        }
 
     # ── 唤醒时间列表操作 ──
 
@@ -206,7 +252,7 @@ class SilencerPlugin(star.Star):
         # scope变更时清空所有缓存和定时任务
         saved = self._sleep_saved_scope
         if saved and saved != scope:
-            _save_cache([])
+            self._set_cache([])
             self._set_until_list([])
             self._sleep_clear()
             self.config["sleep_mode_sessions"] = []
@@ -258,6 +304,12 @@ class SilencerPlugin(star.Star):
         else:
             self.config["sleep_mode"] = True
 
+    def _get_cache(self) -> list:
+        return _load_cache()
+
+    def _set_cache(self, cache: list):
+        _save_cache(cache)
+
     def _sleep_leave(self, session: str):
         """离开睡眠状态，异步处理缓存"""
         scope = str(self.config.get("sleep_scope", "全局"))
@@ -267,13 +319,18 @@ class SilencerPlugin(star.Star):
                 self.config["sleep_mode_sessions"] = [s for s in lst if s != session]
         else:
             self.config["sleep_mode"] = False
+        try:
+            self._config_save("sleep_leave")
+        except:
+            pass
         # 后台处理缓存
-        cache = _load_cache()
+        cache = self._get_cache()
         my_msgs = [c for c in cache if c.get("session") == session]
         if my_msgs:
             async def _process():
                 await self._execute_wake(session)
-            asyncio.create_task(_process())
+            t = asyncio.create_task(_process())
+            self._wake_tasks.append(t)
         else:
             self._remove_until(session)
             self._remove_until("global")
@@ -282,6 +339,23 @@ class SilencerPlugin(star.Star):
         self.config["sleep_mode"] = False
 
     # ── 高峰期自动静默 ──
+
+    def _peak_fill(self, check_sleeping: bool = True) -> bool:
+        """墙钟检查：在高峰期内则补足睡到期末。返回是否补足"""
+        if check_sleeping and self.config.get("sleep_mode", False):
+            return False
+        now = time_module.localtime()
+        # 周末（周六/周日）DeepSeek 无峰谷，不触发高峰静默
+        if now.tm_wday >= 5:
+            return False
+        now_m = now.tm_hour * 60 + now.tm_min
+        if 9 * 60 <= now_m < 12 * 60:
+            self._peak_sleep(12 * 60 - now_m)
+            return True
+        if 14 * 60 <= now_m < 18 * 60:
+            self._peak_sleep(18 * 60 - now_m)
+            return True
+        return False
 
     def _start_peak_watcher(self):
         if self._peak_task and not self._peak_task.done():
@@ -294,24 +368,23 @@ class SilencerPlugin(star.Star):
             self._peak_task = None
 
     async def _peak_scheduler(self):
-        """精确到点触发高峰期，代替60秒轮询"""
+        """循环：墙钟补足高峰 + 睡到最近触发点（仅周一至周五）"""
         DAY = 24 * 60
-        P1_S, P1_E = 9 * 60, 12 * 60
-        P2_S, P2_E = 14 * 60, 18 * 60
+        P1_S, P2_S = 9 * 60, 14 * 60
         while True:
             try:
+                if self._peak_fill():
+                    await asyncio.sleep(60)
+                    continue
                 now = time_module.localtime()
                 now_m = now.tm_hour * 60 + now.tm_min
-                n9 = (P1_S - now_m) % DAY
-                n14 = (P2_S - now_m) % DAY
-                if not n9: n9 = DAY
-                if not n14: n14 = DAY
-                if n9 <= n14:
-                    await asyncio.sleep(n9 * 60)
-                    self._peak_sleep(P1_E - P1_S)
-                else:
-                    await asyncio.sleep(n14 * 60)
-                    self._peak_sleep(P2_E - P2_S)
+                if now.tm_wday >= 5:
+                    # 周末无峰谷，睡到下周一 00:00 再重新计算
+                    wait = ((7 - now.tm_wday) * DAY - now_m) % (7 * DAY)
+                    await asyncio.sleep(wait * 60 if wait else 60)
+                    continue
+                wait = min((P1_S - now_m) % DAY, (P2_S - now_m) % DAY)
+                await asyncio.sleep(wait * 60 if wait else 60)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -325,8 +398,8 @@ class SilencerPlugin(star.Star):
         self._set_until_list([])
         self.config["sleep_mode_sessions"] = []
         # 暂存原scope，强制全局（已有则不覆盖，防重载丢失）
-        if "peak_original_scope" not in self.config:
-            self.config["peak_original_scope"] = self.config.get("sleep_scope", "全局")
+        if not self._peak_original_scope:
+            self._peak_original_scope = self.config.get("sleep_scope", "全局")
         self.config["sleep_scope"] = "全局"
         self._sleep_saved_scope = "全局"
         self._snapshot_save()
@@ -340,7 +413,9 @@ class SilencerPlugin(star.Star):
         async def _auto_wake():
             try:
                 await asyncio.sleep(dur_h * 3600)
-                await self._execute_wake(session)
+                # 墙钟校验：还在高峰期内则续睡到期末
+                if not self._peak_fill(check_sleeping=False):
+                    await self._execute_wake(session)
             except asyncio.CancelledError:
                 pass
             except Exception as e:
@@ -371,7 +446,8 @@ class SilencerPlugin(star.Star):
                             pass
                         except Exception as e:
                             logger.warning(f"恢复唤醒异常: {e}")
-                    asyncio.create_task(_recover())
+                    t = asyncio.create_task(_recover())
+                    self._wake_tasks.append(t)
                     logger.info(f"恢复定时任务: {session} 剩余{left:.0f}秒")
                 else:
                     self._remove_until(session)
@@ -396,18 +472,22 @@ class SilencerPlugin(star.Star):
             pass
 
     def _snapshot_save(self):
-        _save_snapshot({
+        data = {
             "old_sleep_mode": self._old_sleep_mode,
             "old_sleep_sessions": self._old_sleep_sessions,
             "old_peak_enabled": self._old_peak_enabled,
             "old_sleep_until": self._old_sleep_until,
             "sleep_saved_scope": self._sleep_saved_scope,
-        })
+        }
+        # 只在高峰期写入，平时不占位
+        if self._peak_original_scope:
+            data["peak_original_scope"] = self._peak_original_scope
+        _save_snapshot(data)
 
     def _clean_internal_config(self):
         dirty = False
         for k in list(self.config.keys()):
-            if k.startswith("pre-config:") or k in ("just_woke_up", "_old_sleep_mode", "_old_sleep_sessions", "_old_peak_enabled", "sleep_saved_scope"):
+            if k in ("_old_sleep_mode", "_old_sleep_sessions", "_old_peak_enabled", "sleep_saved_scope"):
                 del self.config[k]
                 dirty = True
         if dirty:
@@ -447,6 +527,8 @@ class SilencerPlugin(star.Star):
 
     async def _execute_wake(self, umo: str):
         """执行唤醒"""
+        if not self._is_sleeping():
+            return
         self._cancel_all_tasks()
         self._remove_until(umo)
         self._remove_until("global")
@@ -460,72 +542,128 @@ class SilencerPlugin(star.Star):
         else:
             self.config["sleep_mode"] = False
             self.config["sleep_mode_sessions"] = []
-        cache = _load_cache()
-        _save_cache([])
+        cache = self._get_cache()
         try:
             self._config_save("execute_wake")
         except:
             pass
         if cache:
-            from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
-            from astrbot.core.platform.message_type import MessageType
-            from astrbot.api.message_components import Plain
             _scope = str(self.config.get("sleep_scope", "全局"))
             if _scope in ("session", "仅触发的对话") and umo != "global":
                 cache = [c for c in cache if c.get("session") == umo]
-            # 私聊按会话合并 群聊按会话+sender合并
-            _groups = {}
-            for c in cache:
-                _is_group = c.get("msg_type", "FriendMessage") == "GroupMessage"
-                _key = c.get("session", "") if not _is_group else f"{c.get('session','')}_{c.get('sender_id','')}"
-                if _key not in _groups:
-                    _groups[_key] = []
-                _groups[_key].append(c)
-            for _key, _msgs in _groups.items():
-                _sess = _msgs[0].get("session", "")
-                text = "睡后消息：" + chr(10)
-                for c in _msgs:
-                    text += f"来自 {c.get('sender_id','?')}: {c.get('message')}" + chr(10)
-                msg_obj = AstrBotMessage()
-                _mt = _msgs[0].get("msg_type", "FriendMessage")
-                msg_obj.type = MessageType.GROUP_MESSAGE if _mt == "GroupMessage" else MessageType.FRIEND_MESSAGE
-                if msg_obj.type == MessageType.GROUP_MESSAGE:
-                    from astrbot.core.platform.astrbot_message import Group
-                    _gid = _msgs[0].get("group_id", _sess.split(":")[-1])
-                    _gname = _msgs[0].get("group_name", _gid)
-                    msg_obj.group = Group(group_id=_gid)
-                    msg_obj.group.group_name = _gname
-                msg_obj.self_id = _msgs[0].get("self_id", "0")
-                msg_obj.session_id = _sess.split(":")[-1]
-                msg_obj.message_id = str(time_module.time())
-                msg_obj.sender = MessageMember(user_id=_msgs[0].get("sender_id", "0"), nickname=_msgs[0].get("sender_name", "系统"))
-                msg_obj.message = [Plain(text)]
-                msg_obj.message_str = text
-                msg_obj.raw_message = {"text": text}
-                for p in self.context.platform_manager.platform_insts:
-                    if p.meta().id == _sess.split(":")[0]:
-                        _evt = p.create_event(msg_obj)
-                        _evt.is_at_or_wake_command = True
-                        p.commit_event(_evt)
-                        break
-                else:
-                    for p in self.context.platform_manager.platform_insts:
-                        _evt = p.create_event(msg_obj)
-                        _evt.is_at_or_wake_command = True
-                        p.commit_event(_evt)
-                        break
+            _ok = False
+            for _attempt in range(3):
+                try:
+                    self._replay_items(cache)
+                    _ok = True
+                    break
+                except Exception as _e:
+                    logger.error(f"回放失败({_attempt + 1}/3): {_e}")
+                    if _attempt < 2:
+                        time_module.sleep(1)
+            if not _ok:
+                logger.error("回放重试3次仍失败，保留缓存待下次唤醒重试")
+                return
+        self._set_cache([])
         logger.info("唤醒执行完毕")
         # 高峰期结束后恢复原scope
-        orig = self.config.get("peak_original_scope", "")
-        if orig:
-            self.config["sleep_scope"] = orig
-            self._sleep_saved_scope = orig
+        if self._peak_original_scope:
+            self.config["sleep_scope"] = self._peak_original_scope
+            self._sleep_saved_scope = self._peak_original_scope
+            self._peak_original_scope = ""
             self._snapshot_save()
-            del self.config["peak_original_scope"]
             try:
                 self._config_save("wake_peak_restore")
             except:
                 pass
+
+    def _replay_items(self, items: list):
+        """将缓存条目回放为LLM事件"""
+        if not items:
+            return
+        from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageMember
+        from astrbot.core.platform.message_type import MessageType
+        from astrbot.api.message_components import Plain
+        _groups = {}
+        for c in items:
+            _is_group = c.get("msg_type", "FriendMessage") == "GroupMessage"
+            _key = c.get("session", "") if not _is_group else f"{c.get('session','')}_{c.get('sender_id','')}"
+            if _key not in _groups:
+                _groups[_key] = []
+            _groups[_key].append(c)
+        for _key, _msgs in _groups.items():
+            _sess = _msgs[0].get("session", "")
+            _is_group = _msgs[0].get("msg_type", "FriendMessage") == "GroupMessage"
+            if _is_group:
+                text = "<Sleep_Message>" + chr(10) + chr(10).join(str(c.get("message", "")) for c in _msgs) + chr(10) + "</Sleep_Message>"
+            else:
+                text = "<Sleep_Message>" + chr(10) + chr(10).join(str(c.get("message", "")) for c in _msgs) + chr(10) + "</Sleep_Message>"
+            msg_obj = AstrBotMessage()
+            _mt = _msgs[0].get("msg_type", "FriendMessage")
+            msg_obj.type = MessageType.GROUP_MESSAGE if _mt == "GroupMessage" else MessageType.FRIEND_MESSAGE
+            if msg_obj.type == MessageType.GROUP_MESSAGE:
+                from astrbot.core.platform.astrbot_message import Group
+                _gid = _msgs[0].get("group_id", _sess.split(":")[-1])
+                _gname = _msgs[0].get("group_name", _gid)
+                msg_obj.group = Group(group_id=_gid)
+                msg_obj.group.group_name = _gname
+            msg_obj.self_id = _msgs[0].get("self_id", "0")
+            msg_obj.session_id = _sess.split(":")[-1]
+            msg_obj.message_id = str(time_module.time())
+            msg_obj.sender = MessageMember(user_id=_msgs[0].get("sender_id", "0"), nickname=_msgs[0].get("sender_name", "系统"))
+            msg_obj.message = [Plain(text)]
+            msg_obj.message_str = text
+            msg_obj.raw_message = {"text": text}
+            for p in self.context.platform_manager.platform_insts:
+                if p.meta().id == _sess.split(":")[0]:
+                    _evt = p.create_event(msg_obj)
+                    _evt._silencer_replay = True
+                    p.commit_event(_evt)
+                    break
+            else:
+                for p in self.context.platform_manager.platform_insts:
+                    _evt = p.create_event(msg_obj)
+                    _evt._silencer_replay = True
+                    p.commit_event(_evt)
+                    break
+
+    # ── 插件 Pages: 缓存操作 ──
+
+    async def _page_cache_index(self) -> tuple:
+        from quart import request
+        payload = await request.get_json(silent=True) or {}
+        try:
+            idx = int(payload.get("index", -1))
+        except (TypeError, ValueError):
+            return None, "index 必须是整数"
+        return idx, None
+
+    async def page_cache_delete(self):
+        idx, err = await self._page_cache_index()
+        if err:
+            return {"status": "error", "message": err}
+        cache = self._get_cache()
+        if idx < 0 or idx >= len(cache):
+            return {"status": "error", "message": "索引越界"}
+        item = cache.pop(idx)
+        self._set_cache(cache)
+        return {"status": "ok", "data": {"deleted": item.get("message", "")}}
+
+    async def page_cache_clear(self):
+        self._set_cache([])
+        return {"status": "ok", "data": {"cleared": True}}
+
+    async def page_cache_replay(self):
+        idx, err = await self._page_cache_index()
+        if err:
+            return {"status": "error", "message": err}
+        cache = self._get_cache()
+        if idx < 0 or idx >= len(cache):
+            return {"status": "error", "message": "索引越界"}
+        item = cache.pop(idx)
+        self._set_cache(cache)
+        self._replay_items([item])
+        return {"status": "ok", "data": {"replayed": True}}
 
     @filter.on_llm_request()
     async def check_blacklist(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -562,7 +700,10 @@ class SilencerPlugin(star.Star):
                     req.system_prompt = (req.system_prompt or "") + nl + nl + tag + nl
         # 睡眠模式检查
         if self.config.get("sleep_mode_enabled", True) and self._is_sleeping(session):
-            if session in self.config.get("sleep_disabled_sessions", []):
+            # dashboard 手动回放缓存的消息跳过睡眠拦截，避免又被塞回缓存
+            if getattr(event, '_silencer_replay', False):
+                pass
+            elif session in self.config.get("sleep_disabled_sessions", []):
                 pass
             else:
                 now = time_module.time()
@@ -576,7 +717,7 @@ class SilencerPlugin(star.Star):
                             return
                     except:
                         continue
-                if event.message_str.strip().lower() == "wake":
+                if event.message_str.strip() == "醒醒":
                     _waker = event.get_sender_id()
                     _admins = self.config.get("wake_whitelist", [])
                     _role = getattr(event, 'role', None)
@@ -597,7 +738,7 @@ class SilencerPlugin(star.Star):
                     max_cache = int(self.config.get("sleep_max_cache", 3))
                     max_total = int(self.config.get("sleep_max_total", 5))
                     if max_cache > 0:
-                        cache = _load_cache()
+                        cache = self._get_cache()
                         sess = getattr(event, 'unified_msg_origin', None) or getattr(event, 'session_id', '')
                         if not sess:
                             sess = str(id(event))
@@ -630,7 +771,7 @@ class SilencerPlugin(star.Star):
                                 _cache_item["group_id"] = event.message_obj.group.group_id
                                 _cache_item["group_name"] = event.message_obj.group.group_name
                             cache.append(_cache_item)
-                            _save_cache(cache)
+                            self._set_cache(cache)
                     logger.info(f"睡眠模式拦截: {sender_id}")
                     event.call_llm = False
                     event.stop_event()
@@ -654,23 +795,23 @@ class SilencerPlugin(star.Star):
             duration_minutes(number): 拉黑时长(分钟)，0表示自动按配置区间。可选参数，默认0
         '''
         if not self.config.get("blacklist_enabled", True):
-            return "黑名单没开，拉不了"
+            return "拉不了人"
         if not self.config.get("llm_auto_block", False):
             role = getattr(event, 'role', None)
             sid = getattr(event, 'get_sender_id', lambda: '')()
             wl = self.config.get("cmd_whitelist", [])
             if self.admin_only and role not in ("admin",) and sid not in wl:
-                return "你又不是管理员，拉不了"
+                return "你没权限"
         immune = self.config.get("immune_list", [])
         if user_id in immune:
-            return f"{user_id} 动不了，有免死金牌"
+            return f"这个人拉不了"
         blacklist = self._get_list()
         if user_id in blacklist:
             exp = self._expiry.get(user_id)
             if exp:
                 left = int((exp - time_module.time()) / 60)
-                return f"{user_id} 早就在黑名单里了，剩{left}分钟"
-            return f"{user_id} 早就永久拉黑了"
+                return f"{user_id} 已在黑名单，剩{left}分钟"
+            return f"{user_id} 已在黑名单"
         # 未指定时长时从配置区间随机
         if duration_minutes <= 0:
             mn = self.min_minutes or 30
@@ -689,13 +830,13 @@ class SilencerPlugin(star.Star):
             self._set_list(blacklist)
             _save_expiry(self._expiry, self._get_list())
             logger.info(f"已拉黑用户: {user_id}，时长{duration_minutes}分钟")
-            return f"拉黑了，{duration_minutes}分钟后自动放出来"
+            return f"已拉黑，{duration_minutes}分钟后解除"
         else:
             self._expiry.pop(user_id, None)
             self._set_list(blacklist)
             _save_expiry(self._expiry, self._get_list())
             logger.info(f"已永久拉黑用户: {user_id}")
-            return f"永久拉黑了，别想出来"
+            return "已永久拉黑"
 
     @filter.llm_tool(name="unblock_user")
     async def unblock_user(self, event: AstrMessageEvent, user_id: str):
@@ -706,43 +847,43 @@ class SilencerPlugin(star.Star):
             user_id(string): 需要取消拉黑的用户ID
         '''
         if not self.config.get("blacklist_enabled", True):
-            return "黑名单没开，放不了"
+            return "拉不了人"
         if self.config.get("llm_auto_block", False):
             sid = str(event.get_sender_id())
             if user_id != sid:
                 role = getattr(event, 'role', None)
                 wl = self.config.get("cmd_whitelist", [])
                 if self.admin_only and role not in ("admin",) and sid not in wl:
-                    return "你又不是管理员，放不了"
+                    return "你没权限"
         else:
             role = getattr(event, 'role', None)
             sid = getattr(event, 'get_sender_id', lambda: '')()
             wl = self.config.get("cmd_whitelist", [])
             if self.admin_only and role not in ("admin",) and sid not in wl:
-                return "你又不是管理员，放不了"
+                return "你没权限"
         blacklist = self._get_list()
         if user_id not in blacklist:
-            return f"{user_id} 本来就没在黑名单里"
+            return f"{user_id} 不在黑名单"
         blacklist.remove(user_id)
         self._expiry.pop(user_id, None)
         self._set_list(blacklist)
         _save_expiry(self._expiry, self._get_list())
         logger.info(f"已取消拉黑用户: {user_id}")
-        return f"放出来了"
+        return "已解除拉黑"
 
     @filter.llm_tool(name="go_to_sleep")
     async def go_to_sleep(self, event: AstrMessageEvent, duration_minutes: float = 0):
         '''
-        进入勿扰模式(睡觉)，期间不回复任何消息(白名单除外)。当用户让你去睡觉或休息时，应直接调用此工具，不要只口头答应。
+        去睡觉。当用户让你去睡觉或休息时，应直接调用此工具，不要只口头答应。
 
         Args:
             duration_minutes(number): 睡眠时长(分钟)。不传参时必须传0；传0或留空则自动随机。仅管理员和sleep_custom_users可指定时长。可选参数，默认0
         '''
         if not self.config.get("sleep_mode_enabled", True):
-            return "睡眠关了，睡不着"
+            return "现在不睡"
         role = getattr(event, 'role', None)
         if not self.config.get("sleep_public", False) and self.admin_only and role not in ("admin",):
-            return "你谁啊，我又不是你家的"
+            return "你没权限"
         start_t = self.config.get("sleep_start_time", "")
         end_t = self.config.get("sleep_end_time", "")
         if start_t and end_t:
@@ -760,7 +901,7 @@ class SilencerPlugin(star.Star):
                 else:
                     in_time = start_val <= now_val < end_val
                 if not in_time:
-                    return "现在不是睡觉时间，睡不着"
+                    return "现在不是时候"
             except:
                 pass
         if duration_minutes > 0:
@@ -818,18 +959,18 @@ class SilencerPlugin(star.Star):
         self._wake_tasks = [t for t in self._wake_tasks if not t.done()]
         self._wake_tasks.append(task)
         logger.info("已进入睡眠模式")
-        return "晚安...我去睡了，有什么事明天再说"
+        return "睡了"
 
     @filter.command("拉黑")
     async def add_blacklist(self, event: AstrMessageEvent):
         if not self.config.get("blacklist_enabled", True):
-            yield event.plain_result("黑名单没开，拉不了")
+            yield event.plain_result("拉不了人")
             return
         sid = event.get_sender_id()
         role = getattr(event, 'role', None)
         wl = self.config.get("cmd_whitelist", [])
         if self.admin_only and role not in ("admin",) and sid not in wl:
-            yield event.plain_result("你又不是管理员，拉不了")
+            yield event.plain_result("你没权限")
             return
         # 尝试从消息链提取at
         target = ""
@@ -864,7 +1005,7 @@ class SilencerPlugin(star.Star):
             self._expiry[target] = time_module.time() + minutes * 60
             self._set_list(blacklist)
             _save_expiry(self._expiry, self._get_list())
-            yield event.plain_result(f"已拉黑 {target}，{minutes}分钟后自动放行")
+            yield event.plain_result(f"已拉黑 {target}，{minutes}分钟后解除")
         else:
             self._expiry.pop(target, None)
             self._set_list(blacklist)
@@ -874,13 +1015,13 @@ class SilencerPlugin(star.Star):
     @filter.command("取消拉黑")
     async def remove_blacklist(self, event: AstrMessageEvent):
         if not self.config.get("blacklist_enabled", True):
-            yield event.plain_result("黑名单没开，放不了")
+            yield event.plain_result("黑名单功能未启用")
             return
         sid = event.get_sender_id()
         role = getattr(event, 'role', None)
         wl = self.config.get("cmd_whitelist", [])
         if self.admin_only and role not in ("admin",) and sid not in wl:
-            yield event.plain_result("你又不是管理员，放不了")
+            yield event.plain_result("没有权限执行此操作")
             return
         target = ""
         for comp in event.get_messages():

@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>勿扰zzz - 状态面板</title>
+<style>
+  :root {
+    --bg: #1e1e2e; --card: #27273a; --text: #cdd6f4;
+    --muted: #7f849c; --accent: #89b4fa; --green: #a6e3a1;
+    --red: #f38ba8; --yellow: #f9e2af; --border: #313244;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 24px; max-width: 960px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: var(--muted); font-size: 13px; margin-bottom: 20px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .card h2 { font-size: 14px; margin-bottom: 12px; color: var(--accent); }
+  .row { display: flex; justify-content: space-between; padding: 6px 0; font-size: 13px; border-bottom: 1px dashed var(--border); }
+  .row:last-child { border-bottom: none; }
+  .row .k { color: var(--muted); }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 12px; }
+  .badge.on { background: rgba(166,227,161,.15); color: var(--green); }
+  .badge.off { background: rgba(127,132,148,.15); color: var(--muted); }
+  .badge.warn { background: rgba(243,139,168,.15); color: var(--red); }
+  .list-item { font-size: 13px; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+  .list-item:last-child { border-bottom: none; }
+  .list-item .time { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+  .mono { font-family: "JetBrains Mono", Consolas, monospace; font-size: 12px; }
+  .refresh { position: fixed; right: 20px; bottom: 20px; background: var(--accent); color: #11111b; border: none; border-radius: 8px; padding: 10px 16px; cursor: pointer; font-size: 13px; }
+  .refresh:hover { opacity: .85; }
+  .op-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); border-radius: 5px; padding: 2px 8px; margin-left: 6px; font-size: 12px; cursor: pointer; }
+  .op-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .op-btn.danger:hover { border-color: var(--red); color: var(--red); }
+  .op-btn.top { margin-left: 8px; padding: 3px 10px; }
+  .group { margin-bottom: 12px; }
+  .group-title { font-size: 12px; color: var(--yellow); margin-bottom: 4px; padding: 4px 8px; background: rgba(249,226,175,.08); border-radius: 5px; display: inline-block; }
+  .err { color: var(--red); font-size: 13px; margin: 12px 0; }
+</style>
+</head>
+<body>
+  <h1>勿扰zzz 💤</h1>
+  <div class="sub" id="sub">加载中...</div>
+  <div class="cards">
+    <div class="card">
+      <h2>🚫 黑名单</h2>
+      <div id="blacklist"></div>
+    </div>
+    <div class="card">
+      <h2>😴 睡眠</h2>
+      <div id="sleep"></div>
+    </div>
+    <div class="card">
+      <h2>📊 其他</h2>
+      <div id="misc"></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>💬 缓存消息 (<span id="cache-count">0</span>)<button class="op-btn top danger" onclick="clearCache()">清空全部</button></h2>
+    <div id="cache"></div>
+  </div>
+  <button class="refresh" onclick="load()">刷新</button>
+
+<script>
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+function fmtTime(ts) {
+  if (!ts) return "-";
+  const d = new Date(ts * 1000);
+  return d.toLocaleString("zh-CN", { hour12: false });
+}
+async function load() {
+  const sub = document.getElementById("sub");
+  try {
+    const ctx = await window.AstrBotPluginPage.ready();
+    const data = await window.AstrBotPluginPage.apiGet("page/status");
+    sub.textContent = "更新时间: " + fmtTime(data.server_time);
+
+    // 黑名单
+    const bl = data.blacklist;
+    let blHtml = `<div class="row"><span class="k">开关</span><span class="badge ${bl.enabled ? "on" : "off"}">${bl.enabled ? "开" : "关"}</span></div>`;
+    blHtml += `<div class="row"><span class="k">人数</span><span>${bl.list.length}</span></div>`;
+    blHtml += `<div class="row"><span class="k">免疫名单</span><span>${bl.immune_list.length}人</span></div>`;
+    if (bl.list.length) {
+      for (const uid of bl.list) {
+        const ex = bl.expiry[uid];
+        const left = ex ? ` · 剩${ex.left_minutes}分钟` : "";
+        const tag = bl.immune_list.includes(uid) ? ' <span class="badge warn">免疫</span>' : "";
+        blHtml += `<div class="list-item mono">${esc(uid)}${tag}<br><span class="time">${ex ? "解封 " + fmtTime(ex.expire_at) + left : "永久"}</span></div>`;
+      }
+    } else {
+      blHtml += `<div class="empty">空</div>`;
+    }
+    document.getElementById("blacklist").innerHTML = blHtml;
+
+    // 睡眠
+    const sl = data.sleep;
+    let slHtml = `<div class="row"><span class="k">状态</span><span class="badge ${sl.sleeping ? "on" : "off"}">${sl.sleeping ? "睡觉中" : "醒着"}</span></div>`;
+    slHtml += `<div class="row"><span class="k">作用范围</span><span>${esc(sl.scope)}</span></div>`;
+    slHtml += `<div class="row"><span class="k">允许时段</span><span>${sl.start_time || "-"} ~ ${sl.end_time || "-"}</span></div>`;
+    slHtml += `<div class="row"><span class="k">白名单</span><span>${sl.whitelist.length}人</span></div>`;
+    if (sl.until.length) {
+      for (const u of sl.until) {
+        const [sess, ts] = u.split(":");
+        slHtml += `<div class="list-item mono">${esc(sess)}<br><span class="time">醒于 ${fmtTime(parseFloat(ts))}</span></div>`;
+      }
+    } else {
+      slHtml += `<div class="empty">无唤醒计划</div>`;
+    }
+    document.getElementById("sleep").innerHTML = slHtml;
+
+    // 其他
+    const pk = data.peak_hours;
+    let mHtml = `<div class="row"><span class="k">高峰期静默</span><span class="badge ${pk.enabled ? "on" : "off"}">${pk.enabled ? "开" : "关"}</span></div>`;
+    document.getElementById("misc").innerHTML = mHtml;
+
+    // 缓存: 按会话分组, 组内倒序
+    const cache = data.cache || [];
+    document.getElementById("cache-count").textContent = cache.length;
+    if (!cache.length) {
+      document.getElementById("cache").innerHTML = `<div class="empty">没有缓存消息</div>`;
+    } else {
+      const groups = {};
+      cache.forEach((c, i) => {
+        const key = c.session || "未知会话";
+        (groups[key] = groups[key] || []).push({ ...c, _i: i });
+      });
+      document.getElementById("cache").innerHTML = Object.keys(groups).map(sess => {
+        const items = groups[sess].slice().reverse();
+        return `<div class="group">
+          <span class="group-title">${esc(sess)}</span>
+          ${items.map(c => `
+            <div class="list-item">
+              <span class="time">${esc(c.sender_name || c.sender_id)}</span>
+              <button class="op-btn" onclick="replayCache(${c._i})">回放</button>
+              <button class="op-btn danger" onclick="delCache(${c._i})">删除</button>
+              <br><span class="time">${fmtTime(c.time)}</span>
+              <br>${esc(c.message)}
+            </div>`).join("")}
+        </div>`;
+      }).join("");
+    }
+  } catch (e) {
+    sub.textContent = "加载失败";
+    document.getElementById("cache").innerHTML = `<div class="err">${esc(e.message || e)}</div>`;
+  }
+}
+async function delCache(i) {
+  try {
+    await window.AstrBotPluginPage.apiPost("page/cache/delete", { index: i });
+    load();
+  } catch (e) { alert(e.message || e); }
+}
+async function replayCache(i) {
+  try {
+    await window.AstrBotPluginPage.apiPost("page/cache/replay", { index: i });
+    load();
+  } catch (e) { alert(e.message || e); }
+}
+async function clearCache() {
+  try {
+    await window.AstrBotPluginPage.apiPost("page/cache/clear", {});
+    load();
+  } catch (e) { alert(e.message || e); }
+}
+function waitBridge() {
+  return new Promise((resolve) => {
+    if (window.AstrBotPluginPage) return resolve();
+    let tries = 0;
+    const t = setInterval(() => {
+      if (window.AstrBotPluginPage) { clearInterval(t); resolve(); }
+      else if (++tries > 100) resolve();
+    }, 100);
+  });
+}
+waitBridge().then(load);
+</script>
+</body>
+</html>
